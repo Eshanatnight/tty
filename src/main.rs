@@ -1,14 +1,19 @@
+mod utils;
+
 use std::ffi::CStr;
 use std::os::fd::{AsRawFd, OwnedFd};
 
 use anyhow::anyhow;
-use eframe::egui;
+use eframe::egui::{self, RichText};
 use itertools::Itertools;
 use nix::errno::Errno;
 use nix::fcntl;
 use nix::pty;
 use nix::pty::ForkptyResult;
 use nix::unistd::Pid;
+
+use utils::{replace_font, add_font};
+
 
 fn main() -> anyhow::Result<()> {
     let fd = unsafe {
@@ -57,7 +62,7 @@ struct Tty {
 }
 
 impl Tty {
-    fn new(_cc: &eframe::CreationContext<'_>, fd: OwnedFd) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, fd: OwnedFd) -> Self {
         let flags = nix::fcntl::fcntl(fd.as_raw_fd(), fcntl::FcntlArg::F_GETFL)
             .expect("Should Be a valid fd here");
         let mut flags = fcntl::OFlag::from_bits(flags & fcntl::OFlag::O_ACCMODE.bits())
@@ -69,11 +74,10 @@ impl Tty {
         nix::fcntl::fcntl(fd.as_raw_fd(), fcntl::FcntlArg::F_SETFL(flags))
             .expect("Should not error");
 
-        // TODO: Set fonts later
-        // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
-        // Restore app state using cc.storage (requires the "persistence" feature).
-        // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
-        // for e.g. egui::PaintCallback.
+        // TODO: Figure out font ligetures
+        replace_font(&cc.egui_ctx);
+        add_font(&cc.egui_ctx);
+
         Self {
             fd,
             buffer: Vec::new(),
@@ -113,9 +117,8 @@ impl eframe::App for Tty {
                     }
                 }
             });
-            unsafe {
-                ui.label(std::str::from_utf8_unchecked(&self.buffer));
-            }
+
+            ui.label(RichText::new(String::from_utf8_lossy(&self.buffer)));
         });
     }
 }
