@@ -304,7 +304,7 @@ impl FormatTracker {
 }
 
 pub struct TerminalEmulator {
-    output_buf: AnsiParser,
+    parser: AnsiParser,
     buf: Vec<u8>,
     color_tracker: FormatTracker,
     cursor_pos: CursorState,
@@ -317,7 +317,7 @@ impl TerminalEmulator {
         set_nonblock(&fd);
 
         TerminalEmulator {
-            output_buf: AnsiParser::new(),
+            parser: AnsiParser::new(),
             buf: Vec::new(),
             color_tracker: FormatTracker::new(),
             cursor_pos: CursorState {
@@ -348,7 +348,7 @@ impl TerminalEmulator {
             };
 
             let incoming = &buf[0..read_size];
-            let parsed = self.output_buf.push(incoming);
+            let parsed = self.parser.push(incoming);
             for segment in parsed {
                 match segment {
                     TerminalOutput::Data(data) => {
