@@ -539,12 +539,17 @@ impl TerminalEmulator {
                         self.terminal_buffer.clear_all();
                     }
                     TerminalOutput::CarriageReturn => {
-                        self.cursor_state.pos.y += 1;
+                        self.cursor_state.pos.x = 0;
                     }
                     TerminalOutput::Newline => {
                         self.terminal_buffer
                             .append_newline_at_line_end(&self.cursor_state.pos);
                         self.cursor_state.pos.y += 1;
+                    }
+                    TerminalOutput::Backspace => {
+                        if self.cursor_state.pos.x >= 1 {
+                            self.cursor_state.pos.x -= 1;
+                        }
                     }
                     TerminalOutput::Sgr(sgr) => {
                         // Should this be one big match ???????
@@ -836,6 +841,7 @@ mod test {
         buffer.insert_data(&CursorPos { x: 3, y: 2 }, b"hello world");
         assert_eq!(buffer.data(), b"\n\n   hello world\n\n\n    hello world\n");
     }
+
     #[test]
     fn test_canvas_newline_append() {
         let mut canvas = TerminalBuffer::new(10);
