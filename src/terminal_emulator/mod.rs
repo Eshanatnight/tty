@@ -1,10 +1,10 @@
+use itertools::Itertools as _;
 use nix::pty::ForkptyResult;
 use nix::{errno::Errno, unistd::Pid};
 use std::{
     ffi::CStr,
     os::fd::{AsRawFd, OwnedFd},
 };
-use itertools::Itertools as _;
 
 use ansi::{AnsiParser, TerminalOutput};
 
@@ -26,7 +26,7 @@ fn spawn_shell() -> OwnedFd {
             ForkptyResult::Child => {
                 let shell_name = CStr::from_bytes_with_nul(b"/bin/bash\0")
                     .expect("Should always have null terminator");
-                let args: &[&[u8]] = &[b"bash\0", b"--noprofile\0"];
+                let args: &[&[u8]] = &[b"bash\0", b"--noprofile\0", b"--norc\0"];
 
                 let args: Vec<&'static CStr> = args
                     .iter()
