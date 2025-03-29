@@ -84,13 +84,17 @@ fn setup_fonts(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         REGULAR_FONT_NAME.to_owned(),
-        Arc::new(FontData::from_static(include_bytes!("../res/Hack-Regular.ttf")),
-    ));
+        Arc::new(FontData::from_static(include_bytes!(
+            "../res/Hack-Regular.ttf"
+        ))),
+    );
 
     fonts.font_data.insert(
         BOLD_FONT_NAME.to_owned(),
-        Arc::new(FontData::from_static(include_bytes!("../res/Hack-Bold.ttf")),
-    ));
+        Arc::new(FontData::from_static(include_bytes!(
+            "../res/Hack-Bold.ttf"
+        ))),
+    );
 
     fonts
         .families
@@ -140,7 +144,6 @@ fn setup_fonts(ctx: &egui::Context) {
 
 //     ctx.set_fonts(fonts);
 // }
-
 
 struct Tty {
     terminal_emulator: TerminalEmulator,
@@ -244,7 +247,7 @@ pub fn run(terminal_emulator: TerminalEmulator) {
     eframe::run_native(
         "Termie",
         native_options,
-        Box::new( |cc| Ok(Box::new(Tty::new(cc, terminal_emulator)))),
+        Box::new(|cc| Ok(Box::new(Tty::new(cc, terminal_emulator)))),
     )
     .unwrap();
 }

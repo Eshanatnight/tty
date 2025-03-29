@@ -1,18 +1,40 @@
-use nix::pty::ForkptyResult;
-use nix::{errno::Errno, unistd::Pid};
+use itertools::Itertools as _;
+use nix::{errno::Errno, pty::ForkptyResult, unistd::Pid};
 use std::{
     ffi::CStr,
     ops::Range,
     os::fd::{AsRawFd, OwnedFd},
+    path::Path,
 };
-use itertools::Itertools as _;
+use tempfile::TempDir;
+use thiserror::Error;
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
 
 mod ansi;
 
+const TERMINFO: &[u8] = include_bytes!(std::concat!(std::env!("OUT_DIR"), "/terminfo.tar"));
+
+#[derive(Error, Debug)]
+enum ExtractTerminfoError {
+    #[error("failed to extract")]
+    Extraction(#[source] std::io::Error),
+    #[error("failed to create temp dir")]
+    CreateTempDir(#[source] std::io::Error),
+}
+
+fn extract_terminfo() -> Result<TempDir, ExtractTerminfoError> {
+    let mut terminfo_tarball = tar::Archive::new(TERMINFO);
+    let temp_dir = TempDir::new().map_err(ExtractTerminfoError::CreateTempDir)?;
+    terminfo_tarball
+        .unpack(temp_dir.path())
+        .map_err(ExtractTerminfoError::Extraction)?;
+
+    Ok(temp_dir)
+}
+
 /// Spawn a shell in a child process and return the file descriptor used for I/O
-fn spawn_shell() -> OwnedFd {
+fn spawn_shell(terminfo_dir: &Path) -> OwnedFd {
     unsafe {
         let res = nix::pty::forkpty(None, None).unwrap();
 
@@ -38,6 +60,8 @@ fn spawn_shell() -> OwnedFd {
 
                 // Temporary workaround to avoid rendering issues
                 std::env::remove_var("PROMPT_COMMAND");
+                std::env::set_var("TERMINFO", terminfo_dir);
+                std::env::set_var("TERM", "termie");
                 std::env::set_var("PS1", "$ ");
                 nix::unistd::execvp(shell_name, &args).unwrap();
                 // Should never run
@@ -420,11 +444,13 @@ pub struct TerminalEmulator {
     format_tracker: FormatTracker,
     cursor_state: CursorState,
     fd: OwnedFd,
+    _terminfo_dir: TempDir,
 }
 
 impl TerminalEmulator {
     pub fn new() -> TerminalEmulator {
-        let fd = spawn_shell();
+        let terminfo_dir = extract_terminfo().unwrap();
+        let fd = spawn_shell(terminfo_dir.path());
         set_nonblock(&fd);
 
         TerminalEmulator {
@@ -439,6 +465,7 @@ impl TerminalEmulator {
                 color: TerminalColor::Default,
             },
             fd,
+            _terminfo_dir: terminfo_dir,
         }
     }
 
