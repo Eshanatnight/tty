@@ -306,7 +306,7 @@ impl FormatTracker {
 pub struct TerminalEmulator {
     parser: AnsiParser,
     buf: Vec<u8>,
-    color_tracker: FormatTracker,
+    format_tracker: FormatTracker,
     cursor_pos: CursorState,
     fd: OwnedFd,
 }
@@ -319,7 +319,7 @@ impl TerminalEmulator {
         TerminalEmulator {
             parser: AnsiParser::new(),
             buf: Vec::new(),
-            color_tracker: FormatTracker::new(),
+            format_tracker: FormatTracker::new(),
             cursor_pos: CursorState {
                 x: 0,
                 y: 0,
@@ -354,7 +354,7 @@ impl TerminalEmulator {
                     TerminalOutput::Data(data) => {
                         let output_start = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
                         insert_data_at_position(&data, output_start, &mut self.buf);
-                        self.color_tracker
+                        self.format_tracker
                             .push_range(&self.cursor_pos, output_start..output_start + data.len());
                         update_cursor(&data, &mut self.cursor_pos);
                     }
@@ -368,12 +368,12 @@ impl TerminalEmulator {
                     }
                     TerminalOutput::ClearForwards => {
                         let buf_pos = cursor_to_buffer_position(&self.cursor_pos, &self.buf);
-                        self.color_tracker
+                        self.format_tracker
                             .push_range(&self.cursor_pos, buf_pos..usize::MAX);
                         self.buf = self.buf[..buf_pos].to_vec();
                     }
                     TerminalOutput::ClearAll => {
-                        self.color_tracker
+                        self.format_tracker
                             .push_range(&self.cursor_pos, 0..usize::MAX);
                         self.buf.clear();
                     }
@@ -407,7 +407,7 @@ impl TerminalEmulator {
     }
 
     pub fn format_data(&self) -> Vec<FormatTag> {
-        self.color_tracker.tags()
+        self.format_tracker.tags()
     }
 
     pub fn cursor_pos(&self) -> CursorState {
