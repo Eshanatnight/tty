@@ -82,7 +82,9 @@ impl Tty {
             style.override_text_style = Some(TextStyle::Monospace);
         });
 
-        Tty {
+        cc.egui_ctx.set_pixels_per_point(2.0);
+
+        Self {
             terminal_emulator,
             character_size: None,
         }
