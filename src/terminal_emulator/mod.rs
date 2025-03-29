@@ -1,10 +1,10 @@
-use itertools::Itertools as _;
 use nix::pty::ForkptyResult;
 use nix::{errno::Errno, unistd::Pid};
 use std::{
     ffi::CStr,
     os::fd::{AsRawFd, OwnedFd},
 };
+use itertools::Itertools as _;
 
 use ansi::{AnsiParser, TerminalOutput};
 
@@ -74,7 +74,7 @@ fn cursor_to_buffer_position(cursor_pos: &CursorPos, buf: &[u8]) -> usize {
     let line_start = buf
         .split(|b| *b == b'\n')
         .take(cursor_pos.y)
-        .fold(0, |acc, item| acc + item.len());
+        .fold(0, |acc, item| acc + item.len() + 1);
     line_start + cursor_pos.x
 }
 
