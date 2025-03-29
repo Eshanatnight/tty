@@ -432,7 +432,7 @@ mod test {
         assert_eq!(parser.params, b"0123456789:;<=>?");
         assert_eq!(parser.intermediates, b"!\"#$%&'()*+,-./");
         assert!(matches!(parser.state, CsiParserState::Finished(b'}')));
-        
+
         let mut parser = CsiParser::new();
         parser.push(0x40);
 
