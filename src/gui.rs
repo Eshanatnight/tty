@@ -1,4 +1,4 @@
-use crate::terminal_emulator::{CursorPos, TerminalColor, TerminalEmulator};
+use crate::terminal_emulator::{CursorPos, FormatTag, TerminalColor, TerminalEmulator};
 use eframe::egui::{
     self, text::LayoutJob, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily,
     InputState, Key, Rect, TextFormat, TextStyle, Ui,
@@ -44,33 +44,21 @@ fn get_char_size(ctx: &egui::Context) -> (f32, f32) {
     })
 }
 
-fn character_to_cursor_offset(
-    character_pos: &CursorPos,
-    character_size: &(f32, f32),
-    content: &[u8],
-) -> (f32, f32) {
-    let content_by_lines: Vec<&[u8]> = content.split(|b| *b == b'\n').collect();
-    let num_lines = content_by_lines.len();
-    let x_offset = character_pos.x as f32 * character_size.0;
-    let y_offset = (character_pos.y as i64 - num_lines as i64) as f32 * character_size.1;
-    (x_offset, y_offset)
-}
-
 fn paint_cursor(
     label_rect: Rect,
     character_size: &(f32, f32),
     cursor_pos: &CursorPos,
-    terminal_buf: &[u8],
     ui: &mut Ui,
 ) {
     let painter = ui.painter();
 
-    let bottom = label_rect.bottom();
+    let top = label_rect.top();
     let left = label_rect.left();
-    let cursor_offset = character_to_cursor_offset(cursor_pos, character_size, terminal_buf);
+    let y_offset = cursor_pos.y as f32 * character_size.1;
+    let x_offset = cursor_pos.x as f32 * character_size.0;
     painter.rect_filled(
         Rect::from_min_size(
-            egui::pos2(left + cursor_offset.0, bottom + cursor_offset.1),
+            egui::pos2(left + x_offset, top + y_offset),
             egui::vec2(character_size.0, character_size.1),
         ),
         0.0,
@@ -156,36 +144,31 @@ fn create_terminal_output_layout_job(
 ) -> (LayoutJob, TextFormat) {
     let text_style = &style.text_styles[&TextStyle::Monospace];
     let mut job = egui::text::LayoutJob::simple(
-        unsafe { std::str::from_utf8_unchecked(data).to_string() },
+        std::str::from_utf8(data).unwrap().to_string(),
         text_style.clone(),
         style.visuals.text_color(),
         width,
     );
 
+    job.wrap.break_anywhere = true;
     let textformat = job.sections[0].format.clone();
     job.sections.clear();
     (job, textformat)
 }
 
-fn render_terminal_output(
-    ui: &mut egui::Ui,
-    terminal_emulator: &TerminalEmulator,
-) -> egui::Response {
-    let (mut job, mut textformat) = create_terminal_output_layout_job(
-        ui.style(),
-        ui.available_width(),
-        terminal_emulator.data(),
-    );
+fn add_terminal_data_to_ui(ui: &mut Ui, data: &[u8], format_data: &[FormatTag]) -> egui::Response {
+    let (mut job, mut textformat) =
+        create_terminal_output_layout_job(ui.style(), ui.available_width(), data);
 
     let default_color = textformat.color;
     let terminal_fonts = TerminalFonts::new();
 
-    for tag in terminal_emulator.format_data() {
+    for tag in format_data {
         let mut range = tag.start..tag.end;
         let color = tag.color;
 
         if range.end == usize::MAX {
-            range.end = terminal_emulator.data().len()
+            range.end = data.len()
         }
 
         textformat.font_id.family = terminal_fonts.get_family(tag.bold);
@@ -201,9 +184,71 @@ fn render_terminal_output(
     ui.label(job)
 }
 
+struct TerminalOutputRenderResponse {
+    scrollback_area: Rect,
+    canvas_area: Rect,
+}
+
+fn render_terminal_output(
+    ui: &mut egui::Ui,
+    terminal_emulator: &TerminalEmulator,
+) -> TerminalOutputRenderResponse {
+    let terminal_data = terminal_emulator.data();
+    let mut scrollback_data = terminal_data.scrollback;
+    let mut canvas_data = terminal_data.visible;
+    let mut format_data = terminal_emulator.format_data();
+
+    // Arguably incorrect. Scrollback does end with a newline, and that newline causes a blank
+    // space between widgets. Should we strip it here, or in the terminal emulator output?
+    if scrollback_data.ends_with(b"\n") {
+        scrollback_data = &scrollback_data[0..scrollback_data.len() - 1];
+        if let Some(last_tag) = format_data.scrollback.last_mut() {
+            last_tag.end = last_tag.end.min(scrollback_data.len());
+        }
+    }
+
+    if canvas_data.ends_with(b"\n") {
+        canvas_data = &canvas_data[0..canvas_data.len() - 1];
+    }
+
+    let response = egui::ScrollArea::new([false, true])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            let scrollback_area =
+                add_terminal_data_to_ui(ui, scrollback_data, &format_data.scrollback).rect;
+            let canvas_area = add_terminal_data_to_ui(ui, canvas_data, &format_data.visible).rect;
+            TerminalOutputRenderResponse {
+                scrollback_area,
+                canvas_area,
+            }
+        });
+
+    response.inner
+}
+
+struct DebugRenderer {
+    enable: bool,
+}
+
+impl DebugRenderer {
+    fn new() -> DebugRenderer {
+        DebugRenderer { enable: false }
+    }
+
+    fn render(&self, ui: &mut Ui, rect: Rect, color: Color32) {
+        if !self.enable {
+            return;
+        }
+
+        let color = color.gamma_multiply(0.25);
+        ui.painter().rect_filled(rect, 0.0, color);
+    }
+}
+
 struct TermieGui {
     terminal_emulator: TerminalEmulator,
     character_size: Option<(f32, f32)>,
+    debug_renderer: DebugRenderer,
 }
 
 impl TermieGui {
@@ -218,6 +263,7 @@ impl TermieGui {
         TermieGui {
             terminal_emulator,
             character_size: None,
+            debug_renderer: DebugRenderer::new(),
         }
     }
 }
@@ -230,20 +276,41 @@ impl eframe::App for TermieGui {
 
         self.terminal_emulator.read();
 
-        CentralPanel::default().show(ctx, |ui| {
-            ui.input(|input_state| {
-                write_input_to_terminal(input_state, &mut self.terminal_emulator);
+        let panel_response = CentralPanel::default().show(ctx, |ui| {
+            let frame_response = egui::Frame::new().show(ui, |ui| {
+                ui.set_width(
+                    (crate::terminal_emulator::TERMINAL_WIDTH as f32 + 0.5)
+                        * self.character_size.as_ref().unwrap().0,
+                );
+                ui.set_height(
+                    (crate::terminal_emulator::TERMINAL_HEIGHT as f32 + 0.5)
+                        * self.character_size.as_ref().unwrap().1,
+                );
+
+                ui.input(|input_state| {
+                    write_input_to_terminal(input_state, &mut self.terminal_emulator);
+                });
+
+                let output_response = render_terminal_output(ui, &self.terminal_emulator);
+                self.debug_renderer
+                    .render(ui, output_response.canvas_area, Color32::BLUE);
+
+                self.debug_renderer
+                    .render(ui, output_response.scrollback_area, Color32::YELLOW);
+
+                paint_cursor(
+                    output_response.canvas_area,
+                    self.character_size.as_ref().unwrap(),
+                    &self.terminal_emulator.cursor_pos(),
+                    ui,
+                );
             });
+            self.debug_renderer
+                .render(ui, frame_response.response.rect, Color32::RED);
+        });
 
-            let response = render_terminal_output(ui, &self.terminal_emulator);
-
-            paint_cursor(
-                response.rect,
-                self.character_size.as_ref().unwrap(),
-                &self.terminal_emulator.cursor_pos(),
-                self.terminal_emulator.data(),
-                ui,
-            );
+        panel_response.response.context_menu(|ui| {
+            ui.checkbox(&mut self.debug_renderer.enable, "Debug render");
         });
     }
 }

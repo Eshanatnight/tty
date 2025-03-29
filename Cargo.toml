@@ -9,7 +9,7 @@ edition = "2021"
 anyhow = "1.0.97"
 eframe = "0.31.1"
 tar = "0.4.40"
-nix = { version = "0.29.0", default-features = false, features = ["term", "process", "fs"] }
+nix = { version = "0.29.0", default-features = false, features = ["term", "process", "fs", "ioctl"] }
 tempfile = "3.10.0"
 thiserror = "1.0.56"
 itertools = "0.14.0"
