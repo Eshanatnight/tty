@@ -59,6 +59,8 @@ pub enum TerminalInput {
     ArrowLeft,
     ArrowUp,
     ArrowDown,
+    Home,
+    End,
 }
 
 impl TerminalInput {
@@ -67,10 +69,7 @@ impl TerminalInput {
             TerminalInput::Ascii(c) => TerminalInputPayload::Single(*c),
             TerminalInput::Ctrl(c) => TerminalInputPayload::Single(char_to_ctrl_code(*c)),
             TerminalInput::Enter => TerminalInputPayload::Single(b'\n'),
-            // Hard to tie back, but check default VERASE in terminfo definition
             TerminalInput::Backspace => TerminalInputPayload::Single(0x7f),
-            // https://vt100.net/docs/vt100-ug/chapter3.html
-            // Table 3-6
             TerminalInput::ArrowRight => match decckm_mode {
                 true => TerminalInputPayload::Many(b"\x1bOC"),
                 false => TerminalInputPayload::Many(b"\x1b[C"),
@@ -86,6 +85,14 @@ impl TerminalInput {
             TerminalInput::ArrowDown => match decckm_mode {
                 true => TerminalInputPayload::Many(b"\x1bOB"),
                 false => TerminalInputPayload::Many(b"\x1b[B"),
+            },
+            TerminalInput::Home => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOH"),
+                false => TerminalInputPayload::Many(b"\x1b[H"),
+            },
+            TerminalInput::End => match decckm_mode {
+                true => TerminalInputPayload::Many(b"\x1bOF"),
+                false => TerminalInputPayload::Many(b"\x1b[F"),
             },
         }
     }
@@ -673,7 +680,8 @@ impl TerminalEmulator {
             }
             TerminalInputPayload::Many(mut to_write) => {
                 while !to_write.is_empty() {
-                    let written = nix::unistd::write(self.fd.try_clone().unwrap(), to_write).unwrap();
+                    let written =
+                        nix::unistd::write(self.fd.try_clone().unwrap(), to_write).unwrap();
                     to_write = &to_write[written..];
                 }
             }

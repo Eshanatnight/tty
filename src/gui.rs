@@ -2,8 +2,8 @@ use crate::terminal_emulator::{
     CursorPos, FormatTag, TerminalColor, TerminalEmulator, TerminalInput,
 };
 use eframe::egui::{
-    self, text::LayoutJob, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily,
-    InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
+    self, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily, InputState, Key,
+    Modifiers, Rect, TextFormat, TextStyle, Ui, text::LayoutJob,
 };
 use std::sync::Arc;
 
@@ -86,6 +86,20 @@ fn write_input_to_terminal(input: &InputState, terminal_emulator: &mut TerminalE
                 ..
             } => {
                 terminal_emulator.write(TerminalInput::ArrowRight);
+            }
+            Event::Key {
+                key: Key::Home,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::Home);
+            }
+            Event::Key {
+                key: Key::End,
+                pressed: true,
+                ..
+            } => {
+                terminal_emulator.write(TerminalInput::End);
             }
             _ => (),
         };
