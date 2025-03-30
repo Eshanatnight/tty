@@ -1,18 +1,17 @@
 use crate::error::backtraced_err;
 use crate::terminal_emulator::{
-    CursorPos, FormatTag, TermIo, TerminalColor, TerminalEmulator, TerminalInput,
+    CursorPos, FormatTagSerialized, TermIo, TerminalColor, TerminalEmulator, TerminalInput,
 };
 use eframe::egui::{
     self, text::LayoutJob, Color32, Context, DragValue, Event, FontData, FontDefinitions,
     FontFamily, FontId, InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
 };
 
-use std::borrow::Cow;
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 
-const REGULAR_FONT_NAME: &str = "hack";
-const BOLD_FONT_NAME: &str = "hack-bold";
+const REGULAR_FONT_NAME: &str = "jetbrains-mono";
+const BOLD_FONT_NAME: &str = "jetbrains-mono-bold";
 
 fn write_input_to_terminal<Io: TermIo>(
     input: &InputState,
@@ -199,12 +198,16 @@ fn setup_fonts(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         REGULAR_FONT_NAME.to_owned(),
-        Arc::new(FontData::from_static(include_bytes!("../../res/Hack-Regular.ttf"))),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../res/JetBrainsMonoNerdFont-Regular.ttf"
+        ))),
     );
 
     fonts.font_data.insert(
         BOLD_FONT_NAME.to_owned(),
-        Arc::new(FontData::from_static(include_bytes!("../../res/Hack-Bold.ttf"))),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../../res/JetBrainsMonoNerdFont-Bold.ttf"
+        ))),
     );
 
     fonts
@@ -284,8 +287,9 @@ fn create_terminal_output_layout_job(
 fn add_terminal_data_to_ui(
     ui: &mut Ui,
     data: &[u8],
-    format_data: &[FormatTag],
+    format_data: &[FormatTagSerialized],
     font_size: f32,
+    render_newlines: bool,
 ) -> Result<egui::Response, std::str::Utf8Error> {
     let (mut job, mut textformat) =
         create_terminal_output_layout_job(ui.style(), ui.available_width(), data)?;
@@ -328,7 +332,37 @@ fn add_terminal_data_to_ui(
         });
     }
 
-    Ok(ui.label(job))
+    let galley = ui.fonts(move |fonts| fonts.layout_job(job));
+    let label_response = ui.label(Arc::clone(&galley));
+    if render_newlines {
+        let painter = ui.painter();
+        let font = FontId {
+            size: font_size,
+            family: terminal_fonts.get_family(false),
+        };
+
+        for row in &galley.rows {
+            if row.ends_with_newline {
+                let ui_tl = label_response.rect.left_top() + row.rect.right_top().to_vec2();
+                painter.text(
+                    ui_tl,
+                    egui::Align2::LEFT_TOP,
+                    "\\n",
+                    font.clone(),
+                    ui.style().visuals.text_color(),
+                );
+            }
+        }
+    }
+
+    //  __________
+    // |asdf\n    |
+    // |asdlakdsjf|\n
+    // |          |
+    // |__________|
+    // asdf\nsdlfkjasdlfkjalsdkfjlasdkfj
+
+    Ok(label_response)
 }
 
 struct TerminalOutputRenderResponse {
@@ -338,12 +372,15 @@ struct TerminalOutputRenderResponse {
 
 fn render_terminal_output<Io: TermIo>(
     ui: &mut egui::Ui,
-    terminal_emulator: &TerminalEmulator<Io>,
+    // FIXME: no mut
+    terminal_emulator: &mut TerminalEmulator<Io>,
     font_size: f32,
+    show_newlines: bool,
 ) -> TerminalOutputRenderResponse {
     let terminal_data = terminal_emulator.data();
-    let mut scrollback_data = terminal_data.scrollback;
-    let mut canvas_data = terminal_data.visible;
+    let mut scrollback_data: &[u8] = &terminal_data.scrollback;
+    let mut canvas_data: &[u8] = &terminal_data.visible;
+    println!("{:?}", std::str::from_utf8(canvas_data));
     let mut format_data = terminal_emulator.format_data();
 
     // Arguably incorrect. Scrollback does end with a newline, and that newline causes a blank
@@ -376,12 +413,14 @@ fn render_terminal_output<Io: TermIo>(
                 scrollback_data,
                 &format_data.scrollback,
                 font_size,
+                show_newlines,
             ));
             let canvas_area = error_logged_rect(add_terminal_data_to_ui(
                 ui,
                 canvas_data,
                 &format_data.visible,
                 font_size,
+                show_newlines,
             ));
             TerminalOutputRenderResponse {
                 scrollback_area,
@@ -414,6 +453,7 @@ impl DebugRenderer {
 pub struct TerminalWidget {
     font_size: f32,
     debug_renderer: DebugRenderer,
+    show_newlines: bool,
 }
 
 impl TerminalWidget {
@@ -423,9 +463,11 @@ impl TerminalWidget {
         TerminalWidget {
             font_size: 12.0,
             debug_renderer: DebugRenderer::new(),
+            show_newlines: false,
         }
     }
 
+    #[allow(unused)]
     pub fn calculate_available_size(&self, ui: &mut Ui) -> (usize, usize) {
         let character_size = get_char_size(ui.ctx(), self.font_size);
         let width_chars = (ui.available_width() / character_size.0).floor() as usize;
@@ -450,7 +492,8 @@ impl TerminalWidget {
                 write_input_to_terminal(input_state, terminal_emulator);
             });
 
-            let output_response = render_terminal_output(ui, terminal_emulator, self.font_size);
+            let output_response =
+                render_terminal_output(ui, terminal_emulator, self.font_size, self.show_newlines);
             self.debug_renderer
                 .render(ui, output_response.canvas_area, Color32::BLUE);
 
@@ -472,10 +515,11 @@ impl TerminalWidget {
     pub fn show_options(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.label("Font size:");
-            ui.add(DragValue::new(&mut self.font_size).range(RangeInclusive::new(1.0, 100.0))
-            // .clamp_range(1.0..=100.0)
-        );
+            ui.add(
+                DragValue::new(&mut self.font_size).range(RangeInclusive::new(1.0, 100.0)), // .clamp_range(1.0..=100.0)
+            );
         });
         ui.checkbox(&mut self.debug_renderer.enable, "Debug render");
+        ui.checkbox(&mut self.show_newlines, "Show newlines");
     }
 }
