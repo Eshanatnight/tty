@@ -1,14 +1,14 @@
-use std::{fmt, num::TryFromIntError, path::PathBuf};
+use std::{fmt, num::TryFromIntError, ops::Range, path::PathBuf};
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
-use buffer::TerminalBuffer;
+use buffer::{BufPos, TerminalBuffer2};
 use format_tracker::FormatTracker;
 use recording::{NotIntOfType, Recorder};
 
-pub use format_tracker::FormatTag;
+pub use format_tracker::FormatTagSerialized;
 pub use io::{PtyIo, TermIo};
 pub use recording::{LoadRecordingError, Recording, RecordingHandle, SnapshotItem};
-pub use replay::{ControlAction, ReplayControl, ReplayIo};
+pub use replay::{ControlAction, RecordingAction, ReplayControl, ReplayIo};
 
 use crate::{error::backtraced_err, terminal_emulator::io::ReadResponse};
 use thiserror::Error;
@@ -121,38 +121,6 @@ impl TerminalInput {
             TerminalInput::PageUp => TerminalInputPayload::Many(b"\x1b[5~"),
             TerminalInput::PageDown => TerminalInputPayload::Many(b"\x1b[6~"),
         }
-    }
-}
-
-fn split_format_data_for_scrollback(
-    tags: Vec<FormatTag>,
-    scrollback_split: usize,
-) -> TerminalData<Vec<FormatTag>> {
-    let scrollback_tags = tags
-        .iter()
-        .filter(|tag| tag.start < scrollback_split)
-        .cloned()
-        .map(|mut tag| {
-            tag.end = tag.end.min(scrollback_split);
-            tag
-        })
-        .collect();
-
-    let canvas_tags = tags
-        .into_iter()
-        .filter(|tag| tag.end > scrollback_split)
-        .map(|mut tag| {
-            tag.start = tag.start.saturating_sub(scrollback_split);
-            if tag.end != usize::MAX {
-                tag.end -= scrollback_split;
-            }
-            tag
-        })
-        .collect();
-
-    TerminalData {
-        scrollback: scrollback_tags,
-        visible: canvas_tags,
     }
 }
 
@@ -364,7 +332,19 @@ impl TerminalColor {
     }
 }
 
-pub struct TerminalData<T> {
+// FIXME: god awful name
+pub struct TerminalData2 {
+    // FIXME: slice?
+    pub scrollback: Vec<u8>,
+    pub visible: Vec<u8>,
+    // Line id -> buf pos
+    pub scrollback_line_mappings: Vec<usize>,
+    // line id - scrollback_line_mappings.len()
+    pub visible_line_mappings: Vec<usize>,
+}
+
+#[derive(Debug)]
+pub struct TerminalData<T: std::fmt::Debug> {
     pub scrollback: T,
     pub visible: T,
 }
@@ -417,7 +397,7 @@ pub struct LoadSnapshotError(#[from] LoadSnapshotErrorPriv);
 
 pub struct TerminalEmulator<Io: TermIo> {
     parser: AnsiParser,
-    terminal_buffer: TerminalBuffer,
+    terminal_buffer: TerminalBuffer2,
     format_tracker: FormatTracker,
     cursor_state: CursorState,
     decckm_mode: bool,
@@ -438,7 +418,7 @@ impl TerminalEmulator<PtyIo> {
 
         let ret = TerminalEmulator {
             parser: AnsiParser::new(),
-            terminal_buffer: TerminalBuffer::new(TERMINAL_WIDTH, TERMINAL_HEIGHT),
+            terminal_buffer: TerminalBuffer2::new(TERMINAL_WIDTH, TERMINAL_HEIGHT),
             format_tracker: FormatTracker::new(),
             decckm_mode: false,
             cursor_state: CursorState {
@@ -464,7 +444,7 @@ impl TerminalEmulator<ReplayIo> {
         let parser = AnsiParser::from_snapshot(root.remove("parser").ok_or(ParserNotPresent)?)
             .map_err(LoadParser)?;
         let terminal_buffer =
-            TerminalBuffer::from_snapshot(root.remove("terminal_buffer").ok_or(BufferNotPresent)?)
+            TerminalBuffer2::from_snapshot(root.remove("terminal_buffer").ok_or(BufferNotPresent)?)
                 .map_err(LoadBuffer)?;
         let format_tracker = FormatTracker::from_snapshot(
             root.remove("format_tracker")
@@ -501,14 +481,22 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         width_chars: usize,
         height_chars: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let visible_range = self.terminal_buffer.get_visible_range();
         let response =
             self.terminal_buffer
                 .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
+
+        // Get old format
+        // Clear visible format data
+        // Re-insert new format data with resized window
         self.cursor_state.pos = response.new_cursor_pos;
 
         if response.changed {
             self.io.set_win_size(width_chars, height_chars)?;
             self.recorder.set_win_size(width_chars, height_chars);
+            // FIXME: Preserve coloring info
+            self.format_tracker
+                .push_range(&self.cursor_state, BufPos::new(0, 0)..BufPos::MAX);
         }
 
         Ok(())
@@ -540,8 +528,9 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     let response = self
                         .terminal_buffer
                         .insert_data(&self.cursor_state.pos, &data);
-                    self.format_tracker
-                        .push_range_adjustment(response.insertion_range);
+                    // FIXME: Not complete
+                    //self.format_tracker
+                    //    .delete_range(response.visible_to_scrollback.0);
                     self.format_tracker
                         .push_range(&self.cursor_state, response.written_range);
                     self.cursor_state.pos = response.new_cursor_pos;
@@ -580,13 +569,13 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     if let Some(buf_pos) =
                         self.terminal_buffer.clear_forwards(&self.cursor_state.pos)
                     {
-                        self.format_tracker
-                            .push_range(&self.cursor_state, buf_pos..usize::MAX);
+                        //self.format_tracker
+                        //    .push_range(&self.cursor_state, buf_pos..usize::MAX);
                     }
                 }
                 TerminalOutput::ClearAll => {
                     self.format_tracker
-                        .push_range(&self.cursor_state, 0..usize::MAX);
+                        .push_range(&self.cursor_state, BufPos::new(0, 0)..BufPos::MAX);
                     self.terminal_buffer.clear_all();
                 }
                 TerminalOutput::ClearLineForwards => {
@@ -594,14 +583,17 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                         .terminal_buffer
                         .clear_line_forwards(&self.cursor_state.pos)
                     {
-                        self.format_tracker.delete_range(range);
+                        //self.format_tracker.delete_range(range);
                     }
                 }
                 TerminalOutput::CarriageReturn => {
                     self.cursor_state.pos.x = 0;
                 }
                 TerminalOutput::Newline => {
-                    self.cursor_state.pos.y += 1;
+                    self.cursor_state.pos = self
+                        .terminal_buffer
+                        .insert_data(&self.cursor_state.pos, b"\n")
+                        .new_cursor_pos;
                 }
                 TerminalOutput::Backspace => {
                     if self.cursor_state.pos.x >= 1 {
@@ -612,17 +604,17 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     let response = self
                         .terminal_buffer
                         .insert_lines(&self.cursor_state.pos, num_lines);
-                    self.format_tracker.delete_range(response.deleted_range);
-                    self.format_tracker
-                        .push_range_adjustment(response.inserted_range);
+                    //self.format_tracker.delete_range(response.deleted_range);
+                    //self.format_tracker
+                    //    .push_range_adjustment(response.inserted_range);
                 }
                 TerminalOutput::Delete(num_chars) => {
                     let deleted_buf_range = self
                         .terminal_buffer
                         .delete_forwards(&self.cursor_state.pos, num_chars);
-                    if let Some(range) = deleted_buf_range {
-                        self.format_tracker.delete_range(range);
-                    }
+                    //if let Some(range) = deleted_buf_range {
+                    //    self.format_tracker.delete_range(range);
+                    //}
                 }
                 TerminalOutput::Sgr(sgr) => {
                     // Should this be one big match ???????
@@ -649,8 +641,8 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     let response = self
                         .terminal_buffer
                         .insert_spaces(&self.cursor_state.pos, num_spaces);
-                    self.format_tracker
-                        .push_range_adjustment(response.insertion_range);
+                    //self.format_tracker
+                    //    .push_range_adjustment(response.insertion_range);
                 }
                 TerminalOutput::ResetMode(mode) => match mode {
                     Mode::Decckm => {
@@ -684,13 +676,117 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         }
     }
 
-    pub fn data(&self) -> TerminalData<&[u8]> {
-        self.terminal_buffer.data()
+    // FIXME: no mut
+    pub fn data(&mut self) -> TerminalData<Vec<u8>> {
+        let data = self.terminal_buffer.data();
+        TerminalData {
+            scrollback: data.scrollback,
+            visible: data.visible,
+        }
     }
 
-    pub fn format_data(&self) -> TerminalData<Vec<FormatTag>> {
-        let offset = self.terminal_buffer.data().scrollback.len();
-        split_format_data_for_scrollback(self.format_tracker.tags(), offset)
+    // FIXME: no mut
+    pub fn format_data(&mut self) -> TerminalData<Vec<FormatTagSerialized>> {
+        let (width, height) = self.get_win_size();
+        let mut output_tags = Vec::new();
+        let mut scrollback_tags = Vec::new();
+        // FIXME: serializing twice just to get format data
+        let data = self.terminal_buffer.data();
+
+        #[derive(Eq, PartialEq, Ord, PartialOrd)]
+        enum SerializedPos {
+            Scrollback(usize),
+            Visible(usize),
+        }
+
+        let map_input_to_output = |idx: BufPos| -> SerializedPos {
+            let num_scrollback_lines = data.scrollback_line_mappings.len();
+            let num_visible_lines = data.visible_line_mappings.len();
+            if idx.line_id < num_scrollback_lines {
+                let ret = data.scrollback_line_mappings[idx.line_id] + idx.x_pos;
+                let max = data
+                    .scrollback_line_mappings
+                    .get(idx.line_id + 1)
+                    .cloned()
+                    .unwrap_or(data.scrollback.len());
+                SerializedPos::Scrollback(ret.min(max))
+            } else if idx.line_id < num_scrollback_lines + num_visible_lines {
+                let ret =
+                    data.visible_line_mappings[idx.line_id - num_scrollback_lines] + idx.x_pos;
+                let max = data
+                    .visible_line_mappings
+                    .get(idx.line_id - num_scrollback_lines + 1)
+                    .cloned()
+                    .unwrap_or(data.visible.len());
+                SerializedPos::Visible(ret.min(max))
+            } else if idx == BufPos::MAX {
+                //
+                SerializedPos::Visible(usize::MAX)
+            } else {
+                // FIXME: is this right?
+                SerializedPos::Visible(0)
+            }
+        };
+
+        let input_tags = self.format_tracker.tags();
+        println!("input_tags: {:?}", input_tags);
+        for input_tag in input_tags {
+            let start = map_input_to_output(input_tag.start);
+            let end = map_input_to_output(input_tag.end);
+
+            assert!(start <= end);
+            match (start, end) {
+                (SerializedPos::Scrollback(start), SerializedPos::Scrollback(end)) => {
+                    let output_tag = FormatTagSerialized {
+                        start,
+                        end,
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+
+                    assert!(start <= end);
+                    scrollback_tags.push(output_tag);
+                }
+                (SerializedPos::Visible(start), SerializedPos::Visible(end)) => {
+                    let output_tag = FormatTagSerialized {
+                        start,
+                        end,
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+                    assert!(start <= end);
+
+                    output_tags.push(output_tag);
+                }
+                (SerializedPos::Scrollback(start), SerializedPos::Visible(end)) => {
+                    let scrollback_tag = FormatTagSerialized {
+                        start,
+                        end: data.scrollback.len(),
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+
+                    scrollback_tags.push(scrollback_tag);
+
+                    let visible_tag = FormatTagSerialized {
+                        start: 0,
+                        end,
+                        bold: input_tag.bold,
+                        color: input_tag.color,
+                    };
+                    output_tags.push(visible_tag);
+                }
+                (SerializedPos::Visible(_), SerializedPos::Scrollback(_)) => {
+                    panic!("Backwards range");
+                }
+            }
+        }
+
+        println!("output_tags: {:?}", output_tags);
+        TerminalData {
+            scrollback: scrollback_tags,
+            visible: output_tags,
+        }
     }
 
     pub fn cursor_pos(&self) -> CursorPos {
@@ -729,97 +825,6 @@ impl<Io: TermIo> TerminalEmulator<Io> {
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_format_tracker_scrollback_split() {
-        let tags = vec![
-            FormatTag {
-                start: 0,
-                end: 5,
-                color: TerminalColor::Blue,
-                bold: true,
-            },
-            FormatTag {
-                start: 5,
-                end: 7,
-                color: TerminalColor::Red,
-                bold: false,
-            },
-            FormatTag {
-                start: 7,
-                end: 10,
-                color: TerminalColor::Blue,
-                bold: true,
-            },
-            FormatTag {
-                start: 10,
-                end: usize::MAX,
-                color: TerminalColor::Red,
-                bold: true,
-            },
-        ];
-
-        // Case 1: no split
-        let res = split_format_data_for_scrollback(tags.clone(), 0);
-        assert_eq!(res.scrollback, &[]);
-        assert_eq!(res.visible, &tags[..]);
-
-        // Case 2: Split on a boundary
-        let res = split_format_data_for_scrollback(tags.clone(), 10);
-        assert_eq!(res.scrollback, &tags[0..3]);
-        assert_eq!(
-            res.visible,
-            &[FormatTag {
-                start: 0,
-                end: usize::MAX,
-                color: TerminalColor::Red,
-                bold: true,
-            },]
-        );
-
-        // Case 3: Split a segment
-        let res = split_format_data_for_scrollback(tags.clone(), 9);
-        assert_eq!(
-            res.scrollback,
-            &[
-                FormatTag {
-                    start: 0,
-                    end: 5,
-                    color: TerminalColor::Blue,
-                    bold: true,
-                },
-                FormatTag {
-                    start: 5,
-                    end: 7,
-                    color: TerminalColor::Red,
-                    bold: false,
-                },
-                FormatTag {
-                    start: 7,
-                    end: 9,
-                    color: TerminalColor::Blue,
-                    bold: true,
-                },
-            ]
-        );
-        assert_eq!(
-            res.visible,
-            &[
-                FormatTag {
-                    start: 0,
-                    end: 1,
-                    color: TerminalColor::Blue,
-                    bold: true,
-                },
-                FormatTag {
-                    start: 1,
-                    end: usize::MAX,
-                    color: TerminalColor::Red,
-                    bold: true,
-                },
-            ]
-        );
-    }
 
     #[test]
     fn test_cursor_state_snapshot() {

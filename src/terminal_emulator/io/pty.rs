@@ -71,7 +71,7 @@ fn spawn_shell(terminfo_dir: &Path) -> Result<OwnedFd, SpawnShellError> {
         match res {
             ForkptyResult::Parent { master, .. } => {
                 _master = master;
-            },
+            }
             ForkptyResult::Child => {
                 let shell_name = CStr::from_bytes_with_nul(b"bash\0")
                     .expect("Should always have null terminator");
