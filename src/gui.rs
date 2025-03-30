@@ -2,8 +2,8 @@ use crate::terminal_emulator::{
     CursorPos, FormatTag, TerminalColor, TerminalEmulator, TerminalInput,
 };
 use eframe::egui::{
-    self, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily, InputState, Key,
-    Modifiers, Rect, TextFormat, TextStyle, Ui, text::LayoutJob,
+    self, text::LayoutJob, CentralPanel, Color32, Event, FontData, FontDefinitions, FontFamily,
+    InputState, Key, Modifiers, Rect, TextFormat, TextStyle, Ui,
 };
 use std::sync::Arc;
 
