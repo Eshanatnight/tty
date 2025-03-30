@@ -51,7 +51,13 @@ fn buf_to_cursor_pos(buf: &[u8], width: usize, height: usize, buf_pos: usize) ->
         .find(|(_i, r)| r.end >= buf_pos)
         .unwrap();
 
-    let new_cursor_x = buf_pos - new_cursor_line.start;
+    let new_cursor_x = if buf_pos < new_cursor_line.start {
+        info!("Old cursor position no longer on screen");
+        0
+    } else {
+        buf_pos - new_cursor_line.start
+    };
+
     CursorPos {
         x: new_cursor_x,
         y: new_cursor_y,
@@ -150,6 +156,11 @@ pub struct TerminalBufferInsertResponse {
     pub new_cursor_pos: CursorPos,
 }
 
+pub struct TerminalBufferSetWinSizeResponse {
+    pub changed: bool,
+    pub new_cursor_pos: CursorPos,
+}
+
 pub struct TerminalBuffer {
     buf: Vec<u8>,
     width: usize,
@@ -186,6 +197,52 @@ impl TerminalBuffer {
         }
     }
 
+    /// Inserts data, but will not wrap. If line end is hit, data stops
+    pub fn insert_spaces(
+        &mut self,
+        cursor_pos: &CursorPos,
+        mut num_spaces: usize,
+    ) -> TerminalBufferInsertResponse {
+        num_spaces = self.width.min(num_spaces);
+
+        let buf_pos = cursor_to_buf_pos(&self.buf, cursor_pos, self.width, self.height);
+        match buf_pos {
+            Some((buf_pos, line_range)) => {
+                // Insert spaces until either we hit num_spaces, or the line width is too long
+                let line_len = line_range.end - line_range.start;
+                let num_inserted = (num_spaces).min(self.width - line_len);
+
+                // Overwrite existing with spaces until we hit num_spaces or we hit the line end
+                let num_overwritten = (num_spaces - num_inserted).min(line_range.end - buf_pos);
+
+                // NOTE: We do the overwrite first so we don't have to worry about adjusting
+                // indices for the newly inserted data
+                self.buf[buf_pos..buf_pos + num_overwritten].fill(b' ');
+                self.buf
+                    .splice(buf_pos..buf_pos, std::iter::repeat(b' ').take(num_inserted));
+
+                let used_spaces = num_inserted + num_overwritten;
+                TerminalBufferInsertResponse {
+                    written_range: buf_pos..buf_pos + used_spaces,
+                    new_cursor_pos: cursor_pos.clone(),
+                }
+            }
+            None => {
+                let write_idx = pad_buffer_for_write(
+                    &mut self.buf,
+                    self.width,
+                    self.height,
+                    cursor_pos,
+                    num_spaces,
+                );
+                TerminalBufferInsertResponse {
+                    written_range: write_idx..write_idx + num_spaces,
+                    new_cursor_pos: cursor_pos.clone(),
+                }
+            }
+        }
+    }
+
     pub fn clear_forwards(&mut self, cursor_pos: &CursorPos) -> Option<usize> {
         let line_ranges = calc_line_ranges(&self.buf, self.width);
 
@@ -198,6 +255,16 @@ impl TerminalBuffer {
         let clear_pos = line_range.start + cursor_pos.x;
         self.buf.truncate(clear_pos);
         Some(clear_pos)
+    }
+
+    pub fn clear_line_forwards(&mut self, cursor_pos: &CursorPos) -> Option<Range<usize>> {
+        // Can return early if none, we didn't delete anything if there is nothing to delete
+        let (buf_pos, line_range) =
+            cursor_to_buf_pos(&self.buf, cursor_pos, self.width, self.height)?;
+
+        let del_range = buf_pos..line_range.end;
+        self.buf.drain(del_range.clone());
+        Some(del_range)
     }
 
     pub fn clear_all(&mut self) {
@@ -259,6 +326,35 @@ impl TerminalBuffer {
         TerminalData {
             scrollback: &self.buf[0..start],
             visible: &self.buf[start..],
+        }
+    }
+
+    pub fn set_win_size(
+        &mut self,
+        width: usize,
+        height: usize,
+        cursor_pos: &CursorPos,
+    ) -> TerminalBufferSetWinSizeResponse {
+        let changed = self.width != width || self.height != height;
+        if !changed {
+            return TerminalBufferSetWinSizeResponse {
+                changed: false,
+                new_cursor_pos: cursor_pos.clone(),
+            };
+        }
+
+        // Ensure that the cursor position has a valid buffer position. That way when we resize we
+        // can just look up where the cursor is supposed to be and map it back to it's new cursor
+        // position
+        let buf_pos = pad_buffer_for_write(&mut self.buf, self.width, self.height, cursor_pos, 0);
+        let new_cursor_pos = buf_to_cursor_pos(&self.buf, width, height, buf_pos);
+
+        self.width = width;
+        self.height = height;
+
+        TerminalBufferSetWinSizeResponse {
+            changed,
+            new_cursor_pos,
         }
     }
 }
@@ -431,5 +527,88 @@ mod test {
         let deleted_range = canvas.delete_forwards(&CursorPos { x: 5, y: 5 }, 10);
         assert_eq!(deleted_range, None);
         assert_eq!(canvas.data().visible, b"a\n1234567\n12345\n");
+    }
+
+    #[test]
+    fn test_canvas_insert_spaces() {
+        let mut canvas = TerminalBuffer::new(10, 5);
+        canvas.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf\n123456789012345");
+
+        // Happy path
+        let response = canvas.insert_spaces(&CursorPos { x: 2, y: 0 }, 2);
+        assert_eq!(response.written_range, 2..4);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 0 });
+        assert_eq!(canvas.data().visible, b"as  df\n123456789012345\n");
+
+        // Truncation at newline
+        let response = canvas.insert_spaces(&CursorPos { x: 2, y: 0 }, 1000);
+        assert_eq!(response.written_range, 2..10);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 0 });
+        assert_eq!(canvas.data().visible, b"as        \n123456789012345\n");
+
+        // Truncation at line wrap
+        let response = canvas.insert_spaces(&CursorPos { x: 4, y: 1 }, 1000);
+        assert_eq!(response.written_range, 15..21);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 4, y: 1 });
+        assert_eq!(canvas.data().visible, b"as        \n1234      12345\n");
+
+        // Insertion at non-existant buffer pos
+        let response = canvas.insert_spaces(&CursorPos { x: 2, y: 4 }, 3);
+        assert_eq!(response.written_range, 30..33);
+        assert_eq!(response.new_cursor_pos, CursorPos { x: 2, y: 4 });
+        assert_eq!(
+            canvas.data().visible,
+            b"as        \n1234      12345\n\n     \n"
+        );
+    }
+
+    #[test]
+    fn test_clear_line_forwards() {
+        let mut canvas = TerminalBuffer::new(10, 5);
+        canvas.insert_data(&CursorPos { x: 0, y: 0 }, b"asdf\n123456789012345");
+
+        // Nothing do delete
+        let response = canvas.clear_line_forwards(&CursorPos { x: 5, y: 5 });
+        assert_eq!(response, None);
+        assert_eq!(canvas.data().visible, b"asdf\n123456789012345\n");
+
+        // Hit a newline
+        let response = canvas.clear_line_forwards(&CursorPos { x: 2, y: 0 });
+        assert_eq!(response, Some(2..4));
+        assert_eq!(canvas.data().visible, b"as\n123456789012345\n");
+
+        // Hit a wrap
+        let response = canvas.clear_line_forwards(&CursorPos { x: 2, y: 1 });
+        assert_eq!(response, Some(5..13));
+        assert_eq!(canvas.data().visible, b"as\n1212345\n");
+    }
+
+    #[test]
+    fn test_resize_expand() {
+        // Ensure that on window size increase, text stays in same spot relative to cursor position
+        // This was problematic with our initial implementation. It's less of a problem after some
+        // later improvements, but we can keep the test to make sure it still seems sane
+        let mut canvas = TerminalBuffer::new(10, 6);
+
+        let cursor_pos = CursorPos { x: 0, y: 0 };
+
+        fn simulate_resize(
+            canvas: &mut TerminalBuffer,
+            width: usize,
+            height: usize,
+            cursor_pos: &CursorPos,
+        ) -> TerminalBufferInsertResponse {
+            let mut response = canvas.set_win_size(width, height, cursor_pos);
+            response.new_cursor_pos.x = 0;
+            let mut response = canvas.insert_data(&response.new_cursor_pos, &vec![b' '; width]);
+            response.new_cursor_pos.x = 0;
+            let response = canvas.insert_data(&response.new_cursor_pos, b"$ ");
+            response
+        }
+        let response = simulate_resize(&mut canvas, 10, 5, &cursor_pos);
+        let response = simulate_resize(&mut canvas, 10, 4, &response.new_cursor_pos);
+        let response = simulate_resize(&mut canvas, 10, 3, &response.new_cursor_pos);
+        simulate_resize(&mut canvas, 10, 5, &response.new_cursor_pos);
+        assert_eq!(canvas.data().visible, b"$         \n");
     }
 }

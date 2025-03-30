@@ -203,7 +203,7 @@ fn split_format_data_for_scrollback(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct CursorPos {
     pub x: usize,
     pub y: usize,
@@ -301,6 +301,26 @@ impl TerminalEmulator {
         }
     }
 
+    pub fn set_win_size(&mut self, width_chars: usize, height_chars: usize) {
+        let response =
+            self.terminal_buffer
+                .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
+        self.cursor_state.pos = response.new_cursor_pos;
+
+        if response.changed {
+            let win_size = nix::pty::Winsize {
+                ws_row: height_chars as u16,
+                ws_col: width_chars as u16,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+
+            unsafe {
+                set_window_size(self.fd.as_raw_fd(), &win_size).unwrap();
+            }
+        }
+    }
+
     pub fn write(&mut self, to_write: TerminalInput) {
         match to_write.to_payload(self.decckm_mode) {
             TerminalInputPayload::Single(c) => {
@@ -361,6 +381,14 @@ impl TerminalEmulator {
                             .push_range(&self.cursor_state, 0..usize::MAX);
                         self.terminal_buffer.clear_all();
                     }
+                    TerminalOutput::ClearLineForwards => {
+                        if let Some(range) = self
+                            .terminal_buffer
+                            .clear_line_forwards(&self.cursor_state.pos)
+                        {
+                            self.format_tracker.delete_range(range);
+                        }
+                    }
                     TerminalOutput::CarriageReturn => {
                         self.cursor_state.pos.x = 0;
                     }
@@ -403,6 +431,13 @@ impl TerminalEmulator {
                             warn!("unhandled set mode: {mode:?}");
                         }
                     },
+                    TerminalOutput::InsertSpaces(num_spaces) => {
+                        let response = self
+                            .terminal_buffer
+                            .insert_spaces(&self.cursor_state.pos, num_spaces);
+                        self.format_tracker
+                            .push_range(&self.cursor_state, response.written_range);
+                    }
                     TerminalOutput::ResetMode(mode) => match mode {
                         Mode::Decckm => {
                             self.decckm_mode = false;
