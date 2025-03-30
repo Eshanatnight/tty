@@ -1,4 +1,9 @@
-use super::Mode;
+use super::{
+    recording::{NotIntOfType, NotMap},
+    Mode,
+};
+use crate::terminal_emulator::recording::SnapshotItem;
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectGraphicRendition {
@@ -53,12 +58,14 @@ impl SelectGraphicRendition {
 #[derive(Debug, Eq, PartialEq)]
 pub enum TerminalOutput {
     SetCursorPos { x: Option<usize>, y: Option<usize> },
+    SetCursorPosRel { x: Option<i32>, y: Option<i32> },
     ClearForwards,
     ClearAll,
     CarriageReturn,
     ClearLineForwards,
     Newline,
     Backspace,
+    InsertLines(usize),
     Delete(usize),
     Sgr(SelectGraphicRendition),
     Data(Vec<u8>),
@@ -69,12 +76,23 @@ pub enum TerminalOutput {
     Invalid,
 }
 
+#[derive(Eq, PartialEq, Debug)]
 enum CsiParserState {
     Params,
     Intermediates,
     Finished(u8),
     Invalid,
     InvalidFinished,
+}
+
+mod csi_parser_state_keys {
+    pub const PARAMS: &str = "params";
+    pub const INTERMEDIATES: &str = "intermediates";
+    pub const FINISHED: &str = "finished";
+    pub const INVALID: &str = "invalid";
+    pub const INVALID_FINISHED: &str = "invalid_finished";
+    pub const TYPE: &str = "type";
+    pub const VAL: &str = "val";
 }
 
 fn is_csi_terminator(b: u8) -> bool {
@@ -96,13 +114,13 @@ fn extract_param(idx: usize, params: &[Option<usize>]) -> Option<usize> {
 fn split_params_into_semicolon_delimited_usize(params: &[u8]) -> Result<Vec<Option<usize>>, ()> {
     let params = params
         .split(|b| *b == b';')
-        .map(parse_param_as_usize)
+        .map(parse_param_as::<usize>)
         .collect::<Result<Vec<Option<usize>>, ()>>();
 
     params
 }
 
-fn parse_param_as_usize(param_bytes: &[u8]) -> Result<Option<usize>, ()> {
+fn parse_param_as<T: std::str::FromStr>(param_bytes: &[u8]) -> Result<Option<T>, ()> {
     let param_str =
         std::str::from_utf8(param_bytes).expect("parameter should always be valid utf8");
     if param_str.is_empty() {
@@ -126,10 +144,39 @@ fn mode_from_params(params: &[u8]) -> Mode {
     }
 }
 
+#[derive(Debug, Error)]
+enum LoadCsiParserSnapshotError {
+    #[error(transparent)]
+    RootItemNotMap(NotMap),
+    #[error("could not find item {0}")]
+    MissingItem(&'static str),
+    #[error("{0} is not an array")]
+    ItemNotVec(&'static str),
+    #[error("{0} is not a u8")]
+    ItemNotU8(&'static str, #[source] NotIntOfType),
+    #[error("state is not a map")]
+    StateNotMap,
+    #[error("state missing type specifier")]
+    StateNoType,
+    #[error("state is missing value for finished type")]
+    StateNoFinsihedValue,
+    #[error("state type is not a string")]
+    StateTypeNotString,
+    #[error("{0} is not a valid key")]
+    InvalidState(String),
+}
+
+#[derive(Eq, PartialEq, Debug)]
 struct CsiParser {
     state: CsiParserState,
     params: Vec<u8>,
     intermediates: Vec<u8>,
+}
+
+mod csi_parser_keys {
+    pub const STATE: &str = "state";
+    pub const PARAMS: &str = "params";
+    pub const INTERMEDIATES: &str = "intermediates";
 }
 
 impl CsiParser {
@@ -139,6 +186,107 @@ impl CsiParser {
             params: Vec::new(),
             intermediates: Vec::new(),
         }
+    }
+
+    fn snapshot(&self) -> SnapshotItem {
+        let state = match self.state {
+            CsiParserState::Params => SnapshotItem::Map(
+                [(
+                    csi_parser_state_keys::TYPE.to_string(),
+                    csi_parser_state_keys::PARAMS.into(),
+                )]
+                .into(),
+            ),
+            CsiParserState::Intermediates => SnapshotItem::Map(
+                [(
+                    csi_parser_state_keys::TYPE.to_string(),
+                    csi_parser_state_keys::INTERMEDIATES.into(),
+                )]
+                .into(),
+            ),
+            CsiParserState::Finished(val) => SnapshotItem::Map(
+                [
+                    (
+                        csi_parser_state_keys::TYPE.to_string(),
+                        csi_parser_state_keys::FINISHED.into(),
+                    ),
+                    (csi_parser_state_keys::VAL.to_string(), val.into()),
+                ]
+                .into(),
+            ),
+            CsiParserState::Invalid => SnapshotItem::Map(
+                [(
+                    csi_parser_state_keys::TYPE.to_string(),
+                    csi_parser_state_keys::INVALID.into(),
+                )]
+                .into(),
+            ),
+            CsiParserState::InvalidFinished => SnapshotItem::Map(
+                [(
+                    csi_parser_state_keys::TYPE.to_string(),
+                    csi_parser_state_keys::INVALID_FINISHED.into(),
+                )]
+                .into(),
+            ),
+        };
+
+        let params: SnapshotItem = self.params.iter().collect();
+        let intermediates: SnapshotItem = self.intermediates.iter().collect();
+
+        SnapshotItem::Map(
+            [
+                (csi_parser_keys::STATE.to_string(), state),
+                (csi_parser_keys::PARAMS.to_string(), params),
+                (csi_parser_keys::INTERMEDIATES.to_string(), intermediates),
+            ]
+            .into(),
+        )
+    }
+
+    fn from_snapshot(snapshot: SnapshotItem) -> Result<CsiParser, LoadCsiParserSnapshotError> {
+        use LoadCsiParserSnapshotError::*;
+        let mut items = snapshot.into_map().map_err(RootItemNotMap)?;
+
+        let mut item_to_vec_u8 = |name| -> Result<Vec<u8>, LoadCsiParserSnapshotError> {
+            let params = items.remove(name).ok_or(MissingItem(name))?;
+            let params = params.into_vec().map_err(|_| ItemNotVec(name))?;
+            params
+                .into_iter()
+                .map(|item| item.into_num::<u8>().map_err(|e| ItemNotU8(name, e)))
+                .collect()
+        };
+
+        let params = item_to_vec_u8(csi_parser_keys::PARAMS)?;
+        let intermediates = item_to_vec_u8(csi_parser_keys::INTERMEDIATES)?;
+
+        let state = items
+            .remove(csi_parser_keys::STATE)
+            .ok_or(MissingItem(csi_parser_keys::STATE))?;
+        let mut state = state.into_map().map_err(|_| StateNotMap)?;
+        let typ = state
+            .remove(csi_parser_state_keys::TYPE)
+            .ok_or(StateNoType)?;
+        let typ = typ.into_string().map_err(|_| StateTypeNotString)?;
+        let state = match typ.as_str() {
+            csi_parser_state_keys::PARAMS => CsiParserState::Params,
+            csi_parser_state_keys::INTERMEDIATES => CsiParserState::Intermediates,
+            csi_parser_state_keys::INVALID_FINISHED => CsiParserState::InvalidFinished,
+            csi_parser_state_keys::INVALID => CsiParserState::Invalid,
+            csi_parser_state_keys::FINISHED => {
+                let v = state
+                    .remove(csi_parser_state_keys::VAL)
+                    .ok_or(StateNoFinsihedValue)?;
+                let v = v.into_num().map_err(|e| ItemNotU8("finished::val", e))?;
+                CsiParserState::Finished(v)
+            }
+            _ => Err(InvalidState(typ))?,
+        };
+
+        Ok(CsiParser {
+            state,
+            params,
+            intermediates,
+        })
     }
 
     fn push(&mut self, b: u8) {
@@ -182,10 +330,35 @@ impl CsiParser {
     }
 }
 
+#[derive(Debug, Error)]
+enum LoadSnapshotErrorKind {
+    #[error("{0} is not a {1}")]
+    WrongType(&'static str, &'static str),
+    #[error("{0} is missing {1}")]
+    MissingElem(&'static str, &'static str),
+    #[error("{0} has unknown element {1}")]
+    UnknownElem(&'static str, String),
+    #[error("failed to load csi parser snapshot")]
+    Csi(#[from] LoadCsiParserSnapshotError),
+}
+
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct LoadSnapshotError(#[from] LoadSnapshotErrorKind);
+
+#[derive(Debug, Eq, PartialEq)]
 enum AnsiParserInner {
     Empty,
     Escape,
     Csi(CsiParser),
+}
+
+mod ansi_parser_keys {
+    pub const EMPTY: &str = "empty";
+    pub const ESCAPE: &str = "escape";
+    pub const CSI: &str = "csi";
+    pub const TYPE: &str = "type";
+    pub const VAL: &str = "val";
 }
 
 pub struct AnsiParser {
@@ -196,6 +369,60 @@ impl AnsiParser {
     pub fn new() -> AnsiParser {
         AnsiParser {
             inner: AnsiParserInner::Empty,
+        }
+    }
+
+    pub fn from_snapshot(snapshot: SnapshotItem) -> Result<AnsiParser, LoadSnapshotError> {
+        use LoadSnapshotErrorKind::*;
+        let mut root = snapshot.into_map().map_err(|_| WrongType("root", "map"))?;
+        let typ = root
+            .remove(ansi_parser_keys::TYPE)
+            .ok_or(MissingElem("root", ansi_parser_keys::TYPE))?;
+        let typ = typ
+            .into_string()
+            .map_err(|_| WrongType(ansi_parser_keys::TYPE, "string"))?;
+        let inner = match typ.as_str() {
+            ansi_parser_keys::EMPTY => AnsiParserInner::Empty,
+            ansi_parser_keys::ESCAPE => AnsiParserInner::Escape,
+            ansi_parser_keys::CSI => {
+                let item = root
+                    .remove(ansi_parser_keys::VAL)
+                    .ok_or(MissingElem("root", ansi_parser_keys::VAL))?;
+                AnsiParserInner::Csi(
+                    CsiParser::from_snapshot(item).map_err(LoadSnapshotErrorKind::Csi)?,
+                )
+            }
+            _ => Err(UnknownElem("type", typ))?,
+        };
+        Ok(AnsiParser { inner })
+    }
+
+    pub fn snapshot(&self) -> SnapshotItem {
+        match &self.inner {
+            AnsiParserInner::Empty => SnapshotItem::Map(
+                [(
+                    ansi_parser_keys::TYPE.to_string(),
+                    ansi_parser_keys::EMPTY.into(),
+                )]
+                .into(),
+            ),
+            AnsiParserInner::Escape => SnapshotItem::Map(
+                [(
+                    ansi_parser_keys::TYPE.to_string(),
+                    ansi_parser_keys::ESCAPE.into(),
+                )]
+                .into(),
+            ),
+            AnsiParserInner::Csi(v) => SnapshotItem::Map(
+                [
+                    (
+                        ansi_parser_keys::TYPE.to_string(),
+                        ansi_parser_keys::CSI.into(),
+                    ),
+                    (ansi_parser_keys::VAL.to_string(), v.snapshot()),
+                ]
+                .into(),
+            ),
         }
     }
 
@@ -247,6 +474,62 @@ impl AnsiParser {
                 AnsiParserInner::Csi(parser) => {
                     parser.push(*b);
                     match parser.state {
+                        CsiParserState::Finished(b'A') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move up distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: None,
+                                y: Some(-param.unwrap_or(1)),
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'B') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move down distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: None,
+                                y: Some(param.unwrap_or(1)),
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'C') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move right distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: Some(param.unwrap_or(1)),
+                                y: None,
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
+                        CsiParserState::Finished(b'D') => {
+                            let Ok(param) = parse_param_as::<i32>(&parser.params) else {
+                                warn!("Invalid cursor move left distance");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::SetCursorPosRel {
+                                x: Some(-param.unwrap_or(1)),
+                                y: None,
+                            });
+                            self.inner = AnsiParserInner::Empty;
+                        }
                         CsiParserState::Finished(b'H') => {
                             let params =
                                 split_params_into_semicolon_delimited_usize(&parser.params);
@@ -259,13 +542,13 @@ impl AnsiParser {
                             };
 
                             output.push(TerminalOutput::SetCursorPos {
-                                x: Some(extract_param(0, &params).unwrap_or(1)),
-                                y: Some(extract_param(1, &params).unwrap_or(1)),
+                                x: Some(extract_param(1, &params).unwrap_or(1)),
+                                y: Some(extract_param(0, &params).unwrap_or(1)),
                             });
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'G') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid cursor set position sequence");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -281,7 +564,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'J') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid clear command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -297,7 +580,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'K') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid erase in line command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -315,8 +598,20 @@ impl AnsiParser {
 
                             self.inner = AnsiParserInner::Empty;
                         }
+                        CsiParserState::Finished(b'L') => {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
+                                warn!("Invalid il command");
+                                output.push(TerminalOutput::Invalid);
+                                self.inner = AnsiParserInner::Empty;
+                                continue;
+                            };
+
+                            output.push(TerminalOutput::InsertLines(param.unwrap_or(1)));
+
+                            self.inner = AnsiParserInner::Empty;
+                        }
                         CsiParserState::Finished(b'P') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid del command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -367,7 +662,7 @@ impl AnsiParser {
                             self.inner = AnsiParserInner::Empty;
                         }
                         CsiParserState::Finished(b'@') => {
-                            let Ok(param) = parse_param_as_usize(&parser.params) else {
+                            let Ok(param) = parse_param_as::<usize>(&parser.params) else {
                                 warn!("Invalid ich command");
                                 output.push(TerminalOutput::Invalid);
                                 self.inner = AnsiParserInner::Empty;
@@ -419,8 +714,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(32),
-                y: Some(15)
+                y: Some(32),
+                x: Some(15)
             }
         ));
 
@@ -429,8 +724,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(1),
-                y: Some(32)
+                y: Some(1),
+                x: Some(32)
             }
         ));
 
@@ -439,8 +734,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(32),
-                y: Some(1)
+                y: Some(32),
+                x: Some(1)
             }
         ));
 
@@ -449,8 +744,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(32),
-                y: Some(1)
+                y: Some(32),
+                x: Some(1)
             }
         ));
 
@@ -459,8 +754,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(1),
-                y: Some(1)
+                y: Some(1),
+                x: Some(1)
             }
         ));
 
@@ -469,8 +764,8 @@ mod test {
         assert!(matches!(
             parsed[0],
             TerminalOutput::SetCursorPos {
-                x: Some(1),
-                y: Some(1)
+                y: Some(1),
+                x: Some(1)
             }
         ));
     }
@@ -647,5 +942,182 @@ mod test {
         let output = output_buffer.push(b"\x1b[?1h");
         assert_eq!(output.len(), 1);
         assert_eq!(output[0], TerminalOutput::SetMode(Mode::Decckm));
+    }
+
+    #[test]
+    fn test_rel_move_up_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1A");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[A");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10A");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(-10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_rel_move_down_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1B");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[B");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10B");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                x: None,
+                y: Some(10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_rel_move_right_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1C");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[C");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10C");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_rel_move_left_parsing() {
+        let mut output_buffer = AnsiParser::new();
+        let output = output_buffer.push(b"\x1b[1D");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[D");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(-1)
+            }
+        );
+
+        let output = output_buffer.push(b"\x1b[10D");
+        assert_eq!(output.len(), 1);
+        assert_eq!(
+            output[0],
+            TerminalOutput::SetCursorPosRel {
+                y: None,
+                x: Some(-10)
+            }
+        );
+    }
+
+    #[test]
+    fn test_csi_parser_snapshot() {
+        let mut parser = CsiParser {
+            state: CsiParserState::Params,
+            params: vec![1, 2, 3],
+            intermediates: vec![4, 5, 6],
+        };
+
+        for state in [
+            CsiParserState::Params,
+            CsiParserState::Intermediates,
+            CsiParserState::Finished(75),
+            CsiParserState::Invalid,
+            CsiParserState::InvalidFinished,
+        ] {
+            parser.state = state;
+            let loaded =
+                CsiParser::from_snapshot(parser.snapshot()).expect("failed to load snapshot");
+            assert_eq!(loaded, parser);
+        }
+    }
+
+    #[test]
+    fn test_ansi_parser_snapshot() {
+        for inner in [
+            AnsiParserInner::Empty,
+            AnsiParserInner::Escape,
+            // NOTE: CSI parser tested separately so we only have to test one case here
+            AnsiParserInner::Csi(CsiParser {
+                state: CsiParserState::Invalid,
+                params: vec![2, 3, 4],
+                intermediates: vec![5, 6, 7],
+            }),
+        ] {
+            let parser = AnsiParser { inner };
+            let loaded =
+                AnsiParser::from_snapshot(parser.snapshot()).expect("failed to load snapshot");
+            assert_eq!(loaded.inner, parser.inner);
+        }
     }
 }
