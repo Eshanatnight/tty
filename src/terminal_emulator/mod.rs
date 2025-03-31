@@ -1,4 +1,4 @@
-use std::{fmt, num::TryFromIntError, ops::Range, path::PathBuf};
+use std::{fmt, num::TryFromIntError, path::PathBuf};
 
 use ansi::{AnsiParser, SelectGraphicRendition, TerminalOutput};
 use buffer::{BufPos, TerminalBuffer2};
@@ -481,7 +481,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         width_chars: usize,
         height_chars: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let visible_range = self.terminal_buffer.get_visible_range();
+        let _visible_range = self.terminal_buffer.get_visible_range();
         let response =
             self.terminal_buffer
                 .set_win_size(width_chars, height_chars, &self.cursor_state.pos);
@@ -566,11 +566,11 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     }
                 }
                 TerminalOutput::ClearForwards => {
-                    if let Some(buf_pos) =
+                    if let Some(_buf_pos) =
                         self.terminal_buffer.clear_forwards(&self.cursor_state.pos)
                     {
                         //self.format_tracker
-                        //    .push_range(&self.cursor_state, buf_pos..usize::MAX);
+                        //    .push_range(&self.cursor_state, _buf_pos..usize::MAX);
                     }
                 }
                 TerminalOutput::ClearAll => {
@@ -579,11 +579,11 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     self.terminal_buffer.clear_all();
                 }
                 TerminalOutput::ClearLineForwards => {
-                    if let Some(range) = self
+                    if let Some(_range) = self
                         .terminal_buffer
                         .clear_line_forwards(&self.cursor_state.pos)
                     {
-                        //self.format_tracker.delete_range(range);
+                        //self.format_tracker.delete_range(_range);
                     }
                 }
                 TerminalOutput::CarriageReturn => {
@@ -601,18 +601,18 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     }
                 }
                 TerminalOutput::InsertLines(num_lines) => {
-                    let response = self
+                    let _response = self
                         .terminal_buffer
                         .insert_lines(&self.cursor_state.pos, num_lines);
-                    //self.format_tracker.delete_range(response.deleted_range);
+                    //self.format_tracker.delete_range(_response.deleted_range);
                     //self.format_tracker
-                    //    .push_range_adjustment(response.inserted_range);
+                    //    .push_range_adjustment(_response.inserted_range);
                 }
                 TerminalOutput::Delete(num_chars) => {
-                    let deleted_buf_range = self
+                    let _deleted_buf_range = self
                         .terminal_buffer
                         .delete_forwards(&self.cursor_state.pos, num_chars);
-                    //if let Some(range) = deleted_buf_range {
+                    //if let Some(range) = _deleted_buf_range {
                     //    self.format_tracker.delete_range(range);
                     //}
                 }
@@ -638,11 +638,11 @@ impl<Io: TermIo> TerminalEmulator<Io> {
                     }
                 },
                 TerminalOutput::InsertSpaces(num_spaces) => {
-                    let response = self
+                    let _response = self
                         .terminal_buffer
                         .insert_spaces(&self.cursor_state.pos, num_spaces);
                     //self.format_tracker
-                    //    .push_range_adjustment(response.insertion_range);
+                    //    .push_range_adjustment(_response.insertion_range);
                 }
                 TerminalOutput::ResetMode(mode) => match mode {
                     Mode::Decckm => {
@@ -686,6 +686,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
     }
 
     // FIXME: no mut
+    #[allow(unused)]
     pub fn format_data(&mut self) -> TerminalData<Vec<FormatTagSerialized>> {
         let (width, height) = self.get_win_size();
         let mut output_tags = Vec::new();

@@ -18,6 +18,7 @@ fn bool_aligned_offset(val: usize) -> usize {
     align_to_size(val, std::mem::align_of::<bool>())
 }
 
+#[allow(unused)]
 pub struct TerminalBufferInsertResponse {
     /// Range of written data after insertion of padding
     pub written_range: Range<usize>,
@@ -28,6 +29,7 @@ pub struct TerminalBufferInsertResponse {
     pub new_cursor_pos: CursorPos,
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct TerminalBufferInsertLineResponse {
     /// Range of deleted data **before insertion**
@@ -36,6 +38,7 @@ pub struct TerminalBufferInsertLineResponse {
     pub inserted_range: Range<usize>,
 }
 
+#[allow(unused)]
 pub struct TerminalBufferSetWinSizeResponse {
     pub changed: bool,
     pub insertion_range: Range<usize>,

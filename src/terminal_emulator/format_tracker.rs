@@ -371,6 +371,7 @@ impl FormatTracker {
     //}
 }
 
+// TODO: fix tests
 #[cfg(test)]
 mod test {
     use super::super::{CursorPos, CursorState};
