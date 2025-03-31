@@ -565,7 +565,7 @@ impl TerminalBuffer2 {
         self.scrollback_line_positions.push(self.scrollback.len());
         self.scrollback.extend(line_to_evict.serialize());
         if *line_to_evict.newline {
-            println!("setting newline");
+            debug!("setting newline");
             self.scrollback.push(b'\n');
         }
         self.visible_buf.push_line()
@@ -586,7 +586,7 @@ impl TerminalBuffer2 {
         let mut x = cursor_pos.x;
         let mut y = cursor_pos.y;
         let max_y_idx = self.visible_buf.height - 1;
-        println!("{:?}", std::str::from_utf8(data));
+        debug!("{:?}", std::str::from_utf8(data));
         assert!(y <= max_y_idx);
 
         let write_start = self.cursor_to_buf_pos(cursor_pos);
@@ -658,7 +658,7 @@ impl TerminalBuffer2 {
         num_lines: usize,
     ) -> TerminalBufferInsertLineResponse {
         let mut lines = self.visible_buf.get_all_lines();
-        println!("{:?}", lines);
+        debug!("{:?}", lines);
         for source_idx in (cursor_pos.y..lines.len()).rev() {
             let (a, b) = lines.split_at_mut(source_idx + 1);
             let source = a

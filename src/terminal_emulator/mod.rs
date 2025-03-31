@@ -729,7 +729,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
         };
 
         let input_tags = self.format_tracker.tags();
-        println!("input_tags: {:?}", input_tags);
+        debug!("input_tags: {:?}", input_tags);
         for input_tag in input_tags {
             let start = map_input_to_output(input_tag.start);
             let end = map_input_to_output(input_tag.end);
@@ -782,7 +782,7 @@ impl<Io: TermIo> TerminalEmulator<Io> {
             }
         }
 
-        println!("output_tags: {:?}", output_tags);
+        debug!("output_tags: {:?}", output_tags);
         TerminalData {
             scrollback: scrollback_tags,
             visible: output_tags,
